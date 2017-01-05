@@ -43,8 +43,6 @@ module Main
   )
 where
 
-import Debug.Trace
-
 import qualified Xdg
 
 import Monky.Version (getVersion)
@@ -173,7 +171,7 @@ compile p = do
     exists <- doesFileExist (configFile p)
     createDirectoryIfMissing False (cacheDir p)
     when exists $ do
-        ret <- system $ traceShowId $ concat ["ghc ", compilerFlags p, configFile p, " -o ", exeFile p]
+        ret <- system $ concat ["ghc ", compilerFlags p, configFile p, " -o ", exeFile p]
         case ret of
             (ExitFailure _) -> do
                     hPutStrLn stderr "Compilation failed"
