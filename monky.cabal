@@ -10,7 +10,7 @@ name:                monky
 -- PVP summary:      +-+------- breaking API changes
 --                   | | +----- non-breaking API additions
 --                   | | | +--- code changes with no API change
-version:             2.1.1.0
+version:             2.1.2.0
 
 -- The ABOVE LINE has to stay AS IS (except for version changes) for the
 -- template to work properly
@@ -113,7 +113,7 @@ executable monky
   -- Modules included in this executable, other than Main.
   -- other-modules:
 
-  other-modules: 
+  other-modules:       Xdg
 
   -- LANGUAGE extensions used by modules in this package.
   -- other-extensions:
@@ -121,6 +121,7 @@ executable monky
   -- Other library packages from which modules are imported.
   build-depends:       base >=4.6.0.1 && <5, directory, process, mtl
   build-depends:       unix, containers, monky, optparse-applicative
+  build-depends:       xdg-basedir
 
   -- Directories containing source files.
   -- hs-source-dirs:

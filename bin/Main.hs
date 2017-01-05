@@ -43,36 +43,45 @@ module Main
   )
 where
 
+import Debug.Trace
+
+import qualified Xdg
+
 import Monky.Version (getVersion)
-import Control.Monad (when, unless)
-import Data.List (isSuffixOf, nub, sort)
+import Control.Monad (when, void)
+import Data.List (nub, sort)
 import System.Directory
 import System.Exit (ExitCode(..), exitFailure)
 import System.IO (withFile, IOMode(..), hPutStr, hPutStrLn, stderr)
 import System.Posix.Process (executeFile)
 import System.Process (system)
+import Data.Maybe (catMaybes)
 import Data.Monoid ((<>))
+import Control.Applicative ((<$>))
+import System.IO.Error (tryIOError)
 
 import Options.Applicative
 
 data Action
   = Create
-  | ForceCompile
+  | Clean
   | Recompile
   | Execute
   deriving (Ord, Show, Eq)
 
 getActions :: Config -> [Action]
-getActions c =
-  (if confCompile c then [ForceCompile] else []) ++
-  (if confGenerate c then [Create] else []) ++
-  [Recompile, Execute]
+getActions c = catMaybes
+    [ if confClean c then Just Clean else Nothing
+    , if confGenerate c then Just Create else Nothing
+    , if confNoCompile c then Nothing else Just Recompile
+    , if confNoExec c then Nothing else Just Execute
+    ]
 
 data Config = Config
-  { monkyDir :: String
-  , exeName :: String
+  { _monkyDir :: String
+  , _forceXdg :: Bool
 
-  , confCompile :: Bool
+  , confClean :: Bool
   , confNoCompile :: Bool
 
   , confNoExec :: Bool
@@ -81,22 +90,23 @@ data Config = Config
   , confNoGenerate :: Bool
   } deriving (Show)
 
--- Takes the current $HOME and a config dir, replaces '~' at beginning of paths
-updatePath :: Config -> String -> Config
-updatePath c home = c { monkyDir = monkyDir' }
-  where monkyDir' = case monkyDir c of
-                     ('~':xs) -> home ++ xs
-                     (xs) -> xs
+
+data Paths = Paths
+    { configFile :: FilePath
+    , exeFile    :: FilePath
+    , cacheDir   :: FilePath
+    } deriving (Show)
 
 getConfigP :: Parser Config
 getConfigP = Config <$>
-   strOption (long "monky-dir" <> help "The directory monky resides in. Defaults to ~/.monky" <> short 'd' <> value "~/.monky") <*>
-   strOption (long "monky-exe" <> help "The name of the executable to be created/used." <> short 'e' <> value "monky.exe") <*>
-   switch (long "compile" <> help "Force compilation, even if helper thinks it's not needed" <> short 'c') <*>
+   strOption (long "monky-dir" <> help "The directory monky resides in. Defaults to ~/.monky" <> short 'd' <> value "") <*>
+   switch (long "xdg-dirs" <> help "Force xdg mode" <> short 'x') <*>
+   switch (long "compile" <> help "Remove temporary files, this will force a compilation step" <> short 'c') <*>
    switch (long "no-compile" <> help "Do not try to compile the executable" <> short 'n') <*>
    switch (long "no-exec" <> help "Do not execute the compiled executable") <*>
    switch (long "generate-example" <> help "Force example generation. This will overwrite existing config!") <*>
    switch (long "no-generate-example" <> help "Don't generate the example, even if required")
+
 
 monkyDesc :: String
 monkyDesc = concat
@@ -107,90 +117,104 @@ monkyDesc = concat
   , "This file is a simple helper/wrapper. You can execute monky.exe without."
   ]
 
+
 getConfig :: IO Config
 getConfig = do
-  conf <- execParser opts
-  updatePath conf <$> getHomeDirectory
-  where opts = info (helper <*> getConfigP)
-                    (fullDesc <>
-                      header monkyDesc)
+    conf <- execParser $ info (helper <*> getConfigP) (fullDesc <> header monkyDesc)
+
+    if (confGenerate conf && confNoGenerate conf)
+        then do
+            hPutStrLn stderr "gernate and no-generate given as arguments, are you trying to fool me?"
+            exitFailure
+        else return conf
 
 
-compilerFlags :: String
-compilerFlags = "--make -XOverloadedStrings -odir build -hidir build -O -with-rtsopts=-V0"
-
-
-changeDir :: Config -> IO ()
-changeDir c = do
-  createDirectoryIfMissing False $ monkyDir c
-  setCurrentDirectory $ monkyDir c
+compilerFlags :: Paths -> String
+compilerFlags p =
+    let cdir = cacheDir p
+        sdir = reverse . dropWhile (/= '/') . reverse $ configFile p
+     in concat ["--make -XOverloadedStrings -outputdir ", cdir, " -i", sdir, " -O -with-rtsopts=-V0 "]
 
 
 exampleFile :: String
 exampleFile = unlines
- [ "import Monky"
- , "import Monky.Modules"
- , ""
- , "import Monky.Examples.CPU"
- , "import Monky.Examples.Memory"
- , ""
- , "import Monky.Outputs.Ascii"
- , ""
- , "main :: IO ()"
- , "main = startLoop getAsciiOut"
- , "  [ pollPack 1 $ getRawCPU"
- , "  , pollPack 1 getMemoryHandle"
- , "  ]"
- ]
-
-createExample :: Config -> IO ()
-createExample c =
-  unless (confNoGenerate c)$ withFile "monky.hs" WriteMode (`hPutStr` exampleFile)
+     [ "import Monky"
+     , "import Monky.Modules"
+     , ""
+     , "import Monky.Examples.CPU"
+     , "import Monky.Examples.Memory"
+     , ""
+     , "import Monky.Outputs.Ascii"
+     , ""
+     , "main :: IO ()"
+     , "main = startLoop getAsciiOut"
+     , "  [ pollPack 1 $ getRawCPU"
+     , "  , pollPack 1 $ getMemoryHandle"
+     , "  ]"
+     ]
 
 
-shouldCreate :: IO Bool
-shouldCreate = do
-  files <- getDirectoryContents "."
-  return $ "monky.hs" `notElem` files
+createExample :: Paths -> IO ()
+createExample p = do
+    let dir = reverse . dropWhile (/= '/') . reverse $ configFile p
+    createDirectoryIfMissing False dir
+    withFile (configFile p) WriteMode (`hPutStr` exampleFile)
 
 
-compile :: Config -> IO ()
-compile c = unless (confNoCompile c) $ do
-  exists <- doesFileExist "monky.hs"
-  when exists $ do
-    ret <- system ("ghc " ++ compilerFlags ++ " monky.hs -o " ++ exeName c)
-    case ret of
-      (ExitFailure _) -> do
-        hPutStrLn stderr "Compilation failed"
-        exitFailure
-      ExitSuccess -> return ()
+shouldCreate :: Paths -> IO Bool
+shouldCreate p = do
+    exe <- doesFileExist (exeFile p)
+    conf <- doesFileExist (configFile p)
+    return $ not (exe || conf)
 
 
-forceRecomp :: Config -> IO ()
-forceRecomp c = unless (confNoCompile c) $ do
-  files <- getDirectoryContents "."
-  mapM_ removeFile (filter isCompiled files)
-  when (exeName c `elem` files) (removeFile (exeName c))
-  when ("build" `elem` files) (removeDirectoryRecursive "build")
-  where isCompiled s = isSuffixOf ".hi" s || isSuffixOf ".o" s
+compile :: Paths -> IO ()
+compile p = do
+    exists <- doesFileExist (configFile p)
+    createDirectoryIfMissing False (cacheDir p)
+    when exists $ do
+        ret <- system $ traceShowId $ concat ["ghc ", compilerFlags p, configFile p, " -o ", exeFile p]
+        case ret of
+            (ExitFailure _) -> do
+                    hPutStrLn stderr "Compilation failed"
+                    exitFailure
+            ExitSuccess -> return ()
 
 
-executeMonky :: Config -> IO ()
-executeMonky c = unless (confNoExec c) $ executeFile ("./" ++ exeName c) False [] Nothing
+forceRecomp :: Paths -> IO ()
+forceRecomp p = do
+    void . tryIOError . removeFile . exeFile $ p
+    void . tryIOError . removeDirectoryRecursive . cacheDir $ p
 
 
-execAction :: Action -> (Config -> IO ())
+executeMonky :: Paths -> IO ()
+executeMonky p = executeFile (exeFile p) False [] Nothing
+
+
+execAction :: Action -> (Paths -> IO ())
 execAction Create = createExample
-execAction ForceCompile = forceRecomp
+execAction Clean = forceRecomp
 execAction Recompile = compile
 execAction Execute = executeMonky
 
+singlePaths :: FilePath -> Paths
+singlePaths dir = Paths (dir ++ "/monky.hs") (dir ++ "/monky.exe") (dir ++ "/build/")
+
+getPaths :: Config -> IO Paths
+getPaths (Config "" f _ _ _ _ _) = do
+    xdg <- Xdg.getXdgDirs f
+    case xdg of
+        Nothing -> singlePaths . (++ "/.monky/") <$> getHomeDirectory
+        Just (Xdg.Xdgdirs conf exe cache) -> return $ Paths conf exe cache
+getPaths (Config x _ _ _ _ _ _) =
+    return . singlePaths $ x
 
 main :: IO ()
 main = do
-  conf <- getConfig
-  changeDir conf
-  should <- shouldCreate
-  let actions = getActions conf
-  let acts = map execAction . nub . sort $ if should then Create:actions else actions
-  mapM_ ($conf) acts
+    setCurrentDirectory "/"
+    conf <- getConfig
+    paths <- getPaths conf
+    should <- shouldCreate paths
+    let actions = getActions conf
+    let acts = map execAction . nub . sort $ if should && not (confNoGenerate conf) then Create:actions else actions
+    mapM_ ($ paths) acts
