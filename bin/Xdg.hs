@@ -29,15 +29,17 @@ module Xdg
     )
 where
 
-import System.Environment.XDG.BaseDir (getAllDataDirs, getAllConfigDirs, getUserDataDir, getUserCacheDir, getUserConfigDir)
+import System.Environment.XDG.BaseDir
 import System.Directory (findFile, doesFileExist, doesDirectoryExist)
 import Control.Applicative ((<$>))
 
 data Xdgdirs = Xdgdirs
     { configFile :: FilePath
-    , exeFile    :: FilePath
     , cacheDir   :: FilePath
+    , exeFile    :: FilePath
     } deriving (Show)
+
+data Conf = Defaulted FilePath | User FilePath | System FilePath
 
 -- The "" in here are because the api doesn't expect us to cheat :)
 
@@ -61,34 +63,54 @@ The helper allows for the config file to be in either $DIR/monky.hs or
 $DIR/monky/monky.hs. Both the user config dir and the system config dir
 are checked!
 -}
-findConfigFile :: IO (Either FilePath FilePath)
+findConfigFile :: IO Conf
 findConfigFile = do
-    dirs <- getAllConfigDirs ""
-    found <- findFile (appendDirName dirs "/monky/") "monky.hs"
-    case found of
-        Just x -> return $ Right x
-        Nothing -> Left . (++ "/monky.hs") <$> getUserConfigDir ""
+    dir <- getUserConfigDir ""
+    fuser <- findFile (appendDirName [dir] "/monky/") "monky.hs"
+    dirs <- getSystemConfigDirs ""
+    fsys <- findFile (appendDirName dirs "/monky/") "monky.hs"
+    return $ case fuser of
+        Just x -> User x
+        Nothing -> case fsys of
+            Just x -> System x
+            Nothing -> Defaulted $ dir ++ "/monky.hs"
 
+findUserExecutable :: IO FilePath
+findUserExecutable = do
+    dir <- getUserDataDir ""
+    e <- doesDirectoryExist (dir ++ "/monky/")
+    if e
+       then return $ dir ++ "/monky/monky.exe"
+       else return $ dir ++ "/monky.exe"
+
+-- | Default to user path, it should be the only one where we have +w
 findExecutable :: IO FilePath
 findExecutable = do
-    dirs <- getAllDataDirs ""
-    found <- findFile (appendDirName dirs "/monky/") "/monky.exe"
-    case found of
-        Just x -> return x
-        Nothing -> do
-            udir <- getUserDataDir ""
-            e <- doesDirectoryExist (udir ++ "/monky/")
-            return $ if e then udir ++ "/monky/monky.exe" else udir ++ "/monky.exe"
+    path <- findUserExecutable
+    e <- doesFileExist path
+    if e
+       -- Use user path if the file exists!
+       then return path
+       else do
+            -- try system dirs, if none exists, return user path
+            dirs <- getSystemDataDirs ""
+            found <- findFile (appendDirName dirs "/monky/") "/monky.exe"
+            case found of
+                Just x -> return x
+                Nothing -> return path
 
 -- | Get the xdg aware paths. Force if f is given
 getXdgDirs :: Bool -> IO (Maybe Xdgdirs)
 getXdgDirs f = do
     cache <- getUserCacheDir "monky"
     config <- findConfigFile
-    exe <- findExecutable
 
-    e <- doesFileExist exe
-    c <- either (const $ return False) (doesFileExist) config
-    return $ if e || c || f
-       then Just $ Xdgdirs (either id id config) exe cache
-       else Nothing
+    case config of
+        User conf -> Just . Xdgdirs conf cache <$> findUserExecutable
+        System conf -> Just . Xdgdirs conf cache <$> findExecutable
+        Defaulted conf -> do
+            exe <- findExecutable
+            e <- doesFileExist exe
+            return $ if f || e
+                then Just $ Xdgdirs conf cache exe
+                else Nothing
