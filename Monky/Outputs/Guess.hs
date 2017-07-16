@@ -51,6 +51,7 @@ import Monky.Outputs.Show (getShowOut)
 import Monky.Outputs.Dzen2 (getDzenOutDiv)
 import Monky.Outputs.I3 (getI3Output)
 import Monky.Outputs.Serialize (getSerializeOut)
+import Monky.Outputs.Ongybar (getOngyOut)
 
 #if MIN_VERSION_base(4,8,0)
 #else
@@ -130,6 +131,7 @@ chooseProcessOut
 chooseProcessOut height path divider x
   | x == "dzen2" = GO <$> getDzenOutDiv height path divider
   | x == "i3bar" = GO <$> getI3Output
+  | x == "ongybar" = GO <$> getOngyOut
   | x `elem`networkOuts = GO <$> getSerializeOut
   | otherwise = GO <$> getShowOut
 
