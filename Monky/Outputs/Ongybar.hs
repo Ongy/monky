@@ -43,6 +43,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as E
 import qualified Data.Text.Read as R
 
+import Control.Applicative (pure)
+
 -- |The output handle for dzen2 pipe
 data OngyOutput = OngyOutput
 
