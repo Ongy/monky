@@ -95,11 +95,53 @@ putElem (MonkyHBar p) = do
     putWord16host . fromIntegral $ p * 10
     putWord16host 50
 
-putList :: [MonkyOut] -> Put
-putList xs = do
+isDraw :: MonkyOut -> Bool
+isDraw (MonkyHBar _) = True
+isDraw (MonkyColor _ x) = isDraw x
+isDraw _ = False
+
+-- The monky element to output, and an offset
+putDraws :: [MonkyOut] -> Float -> PutM Float
+putDraws [] f = pure f
+putDraws ((MonkyHBar x):xs) f = do
+    let right = fromIntegral x + f
+    putWord8 1
+    putWord16host . floor $ f -- x1
+    putWord16host 25 -- y1
+    putWord16host . floor $ right -- x2
+    putWord16host 75 -- y2
+    putDraws xs right
+putDraws ((MonkyColor (c, _) x):xs) f = do
+    putWord8 3
+    putColor c
+    f2 <- putDraws [x] f
+    putDraws xs f2
+putDraws (_:xs) f = putDraws xs f
+
+groupDrawable :: [MonkyOut] -> Put
+groupDrawable xs = do
+    -- ys is a group of drawables!
+    let ys = dropWhile (not . isDraw) xs
+    let zs = dropWhile (isDraw) ys
+
     putWord8 0
-    putWord8 . fromIntegral $ length xs
-    mapM_ putElem xs
+    putWord8 3
+    putList $ takeWhile (not . isDraw) xs
+    putWord8 5
+    putWord8 2 -- Draw in semi-absolute values
+    putWord8 . fromIntegral $ length ys
+    _ <- putDraws ys 0
+
+    putList $ zs
+
+putList :: [MonkyOut] -> Put
+putList xs = if any isDraw xs
+    then groupDrawable xs
+    else  do
+        putWord8 0
+        putWord8 . fromIntegral $ length xs
+        mapM_ putElem xs
+
 
 instance MonkyOutput OngyOutput where
     doLine _ [] = error "Why are you calling doLine without any modules? I don't think your config makes sense"
